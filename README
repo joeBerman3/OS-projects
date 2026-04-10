@@ -2,8 +2,12 @@ A fork of xv6 with support for devcontainer.
 
 # Installation
 1. Clone the repository.
-2. Install devcontainer dependencies https://code.visualstudio.com/docs/remote/containers#_installation.
-    * Linux users might need to also do https://docs.docker.com/engine/install/linux-postinstall/.
+2. Install devcontainer dependencies.
+    * Install VS Code: https://code.visualstudio.com/
+    * Install Docker (Docker Desktop or Docker Engine): https://docs.docker.com/get-docker/
+    * Install the "Dev Containers" VS Code extension: https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers
+    * Follow the official Dev Containers setup guide: https://code.visualstudio.com/docs/remote/containers#_installation
+    * Linux users may also need Docker post-install steps (permissions/non-root usage): https://docs.docker.com/engine/install/linux-postinstall/
 3. Open vscode and select File -> open folder.
 4. Select the cloned repository folder.
 5. Press "Reopen in Container".

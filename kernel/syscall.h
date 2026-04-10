@@ -20,3 +20,5 @@
 #define SYS_link   19
 #define SYS_mkdir  20
 #define SYS_close  21
+#define SYS_memsize 22 //task 2, new syscall memsize
+#define SYS_co_yield 23 //task 3, new syscall yield

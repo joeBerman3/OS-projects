@@ -603,6 +603,78 @@ kill(int pid)
   return -1;
 }
 
+// Cooperative yield between two processes.
+// The caller sends value to target pid and then sleeps waiting
+// for the target to yield back.
+int
+co_yield(int pid, int value)
+{
+  struct proc *p = myproc();
+  struct proc *t;
+  int sent = 0;
+
+  if(pid <= 0 || pid == p->pid)
+    return -1;
+
+  acquire(&wait_lock);
+
+  // Positive values are valid payloads in this assignment.
+  // 0 means we have not yet received a value from the peer.
+  p->trapframe->a0 = 0;
+
+  for(;;){
+    if(p->trapframe->a0 > 0){
+      int ret = p->trapframe->a0;
+      release(&wait_lock);
+      return ret;
+    }
+
+    t = 0;
+    for(struct proc *pp = proc; pp < &proc[NPROC]; pp++){
+      acquire(&pp->lock);
+      if(pp->pid == pid && pp->state != UNUSED){
+        t = pp;
+        break;
+      }
+      release(&pp->lock);
+    }
+
+    if(t == 0){
+      release(&wait_lock);
+      return -1;
+    }
+
+    if(t->killed || t->state == ZOMBIE){
+      release(&t->lock);
+      release(&wait_lock);
+      return -1;
+    }
+
+    // Deliver only when the peer is blocked in co_yield waiting on us.
+    if(!sent && t->state == SLEEPING && t->chan == p){
+      t->trapframe->a0 = value;
+      t->state = RUNNABLE;
+      sent = 1;
+    }
+    release(&t->lock);
+
+    if(killed(p)){
+      release(&wait_lock);
+      return -1;
+    }
+
+    // Return only after both directions of the rendezvous are complete.
+    if(sent && p->trapframe->a0 > 0){
+      int ret = p->trapframe->a0;
+      release(&wait_lock);
+      return ret;
+    }
+
+    // Not yet matched with peer; wait for it.
+    sleep(t, &wait_lock);
+  }
+}
+
 void
 setkilled(struct proc *p)
 {

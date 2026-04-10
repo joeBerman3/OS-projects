@@ -101,6 +101,8 @@ extern uint64 sys_unlink(void);
 extern uint64 sys_link(void);
 extern uint64 sys_mkdir(void);
 extern uint64 sys_close(void);
+extern uint64 sys_memsize(void); //task 2, new syscall memsize
+extern uint64 sys_co_yield(void); //task 3, new syscall yield
 
 // An array mapping syscall numbers from syscall.h
 // to the function that handles the system call.
@@ -126,6 +128,8 @@ static uint64 (*syscalls[])(void) = {
 [SYS_link]    sys_link,
 [SYS_mkdir]   sys_mkdir,
 [SYS_close]   sys_close,
+[SYS_memsize] sys_memsize, //task 2, new syscall memsize
+[SYS_co_yield] sys_co_yield, //task 3, new syscall yield
 };
 
 void

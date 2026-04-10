@@ -36,3 +36,5 @@ entry("getpid");
 entry("sbrk");
 entry("sleep");
 entry("uptime");
+entry("memsize"); #task 2, new syscall memsize
+entry("co_yield"); #task 3, new syscall yield
