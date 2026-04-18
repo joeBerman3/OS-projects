@@ -464,6 +464,11 @@ scheduler(void)
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
+        // co_yield may have swapped c->proc via a direct process-to-
+        // process switch, so the process handing control back is not
+        // necessarily the one we originally swtched to.  Release the
+        // lock of whichever process actually returned, tracked in c->proc.
+        p = c->proc;
         c->proc = 0;
       }
       release(&p->lock);
@@ -604,75 +609,108 @@ kill(int pid)
 }
 
 // Cooperative yield between two processes.
-// The caller sends value to target pid and then sleeps waiting
-// for the target to yield back.
+//
+// If the peer is already blocked in co_yield waiting for us, we hand
+// off the CPU directly to it by swtch-ing into its saved context: no
+// sleep(), no wakeup(), no trip through scheduler(), and the target
+// never enters RUNNABLE.  Otherwise we mark ourselves SLEEPING and
+// drop into sched() so the scheduler can run someone else until a
+// peer yields back to us.
 int
 co_yield(int pid, int value)
 {
   struct proc *p = myproc();
-  struct proc *t;
-  int sent = 0;
+  struct proc *t = 0;
 
+  // Avoid misbehavior if someone passes an invalid pid 
+  // or if they pass their own pid.
   if(pid <= 0 || pid == p->pid)
     return -1;
 
+  // Find the target process.
+  // We hold wait_lock to ensure the peer won't exit and be re-allocated
+  // between the time we find it and the time we acquire its lock.
   acquire(&wait_lock);
 
-  // Positive values are valid payloads in this assignment.
-  // 0 means we have not yet received a value from the peer.
-  p->trapframe->a0 = 0;
-
-  for(;;){
-    if(p->trapframe->a0 > 0){
-      int ret = p->trapframe->a0;
-      release(&wait_lock);
-      return ret;
+  // Locate target and keep its lock held on match.
+  for(struct proc *pp = proc; pp < &proc[NPROC]; pp++){
+    acquire(&pp->lock); // acquire each proc lock in turn, looking for a match on pid
+    if(pp->pid == pid){ // if we find a match, we keep the lock held and break, leaving it in to be used after the loop
+      t = pp; // if we find the target, we break with its lock held, and t pointing to it, so we can check its state and possibly directly swtch to it
+      break;
     }
-
-    t = 0;
-    for(struct proc *pp = proc; pp < &proc[NPROC]; pp++){
-      acquire(&pp->lock);
-      if(pp->pid == pid && pp->state != UNUSED){
-        t = pp;
-        break;
-      }
-      release(&pp->lock);
-    }
-
-    if(t == 0){
-      release(&wait_lock);
-      return -1;
-    }
-
-    if(t->killed || t->state == ZOMBIE){
-      release(&t->lock);
-      release(&wait_lock);
-      return -1;
-    }
-
-    // Deliver only when the peer is blocked in co_yield waiting on us.
-    if(!sent && t->state == SLEEPING && t->chan == p){
-      t->trapframe->a0 = value;
-      t->state = RUNNABLE;
-      sent = 1;
-    }
-    release(&t->lock);
-
-    if(killed(p)){
-      release(&wait_lock);
-      return -1;
-    }
-
-    // Return only after both directions of the rendezvous are complete.
-    if(sent && p->trapframe->a0 > 0){
-      int ret = p->trapframe->a0;
-      release(&wait_lock);
-      return ret;
-    }
-
-    // Not yet matched with peer; wait for it.
-    sleep(t, &wait_lock);
+    release(&pp->lock); // if we don't find a match, we release the lock and keep looking
   }
+  if(t == 0){ // if we finish the loop without finding the target, t will be 0, and we return an error
+    release(&wait_lock);
+    return -1;
+  }
+
+  acquire(&p->lock); // acquire our own lock to change our state and chan, and to check if we've been killed
+
+  // Check if target is in a state that can be yielded to. If not, return an error.
+  if(t->state == UNUSED || t->state == ZOMBIE || t->killed){
+    release(&p->lock);
+    release(&t->lock);
+    release(&wait_lock);
+    return -1;
+  }
+
+  if(t->state == SLEEPING && t->chan == p){
+    // Peer is already blocked waiting for us: direct hand-off,
+    // bypassing scheduler() and skipping RUNNABLE entirely.
+    t->trapframe->a0 = value; // deliver payload
+    t->state = RUNNING;
+
+    p->chan = t;
+    p->state = SLEEPING;
+
+    mycpu()->proc = t; // CPU now owns target
+
+    release(&wait_lock);
+
+    // Drop our own p->lock before swtch. The usual xv6 convention
+    // (hold own lock across swtch, scheduler releases it) cannot
+    // apply here — there is no scheduler thread in this path to
+    // release it for us, and if we kept it held no peer could ever
+    // acquire p->lock to hand control back. Single-CPU: safe,
+    // because no other thread runs on this CPU between the release
+    // and the swtch.
+    release(&p->lock);
+
+    // t->lock stays held across swtch. When t resumes past its own
+    // earlier swtch it will release its own lock (it returns into
+    // either the sched() branch below or the mirror of this branch).
+    swtch(&p->context, &t->context);
+
+    // Resumed: the peer that switched back to us acquired p->lock
+    // to deliver its payload and flip our state; by symmetry it is
+    // held now.
+    int k = p->killed;
+    uint64 v = p->trapframe->a0;
+    release(&p->lock);
+    return k ? -1 : (int)v;
+  }
+
+  // Peer is not ready.  Mark ourselves SLEEPING on t and hand the
+  // CPU back to scheduler() via sched() — without calling sleep().
+  release(&t->lock);
+
+  p->chan = t;
+  p->state = SLEEPING;
+
+  release(&wait_lock);
+  // p->lock stays held, as sched() requires.
+
+  sched();
+
+  // Resumed: p->lock is held — either by a peer's direct swtch (which
+  // acquired p->lock before flipping our state), or by scheduler()
+  // after kill() flipped us to RUNNABLE.
+  int k = p->killed;
+  uint64 v = p->trapframe->a0;
+  release(&p->lock);
+  return k ? -1 : (int)v;
 }
 
 void

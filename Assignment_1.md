@@ -63,9 +63,11 @@ In `kernel/sysproc.c`:
 
 ### Step 5 - Add kernel co_yield logic
 In `kernel/proc.c`:
-- Implemented `co_yield(int pid, int value)` with synchronization around `wait_lock` and process locks.
-- Implemented rendezvous behavior using sleep/wakeup channels and process state checks.
-- Enforced all required error checks.
+- Implemented `co_yield(int pid, int value)` using **direct process-to-process context switching** (via `swtch`) when the peer is already blocked waiting for us — bypasses `scheduler()` and skips the `RUNNABLE` state entirely, as the assignment requires.
+- Does **not** use xv6's `sleep()` primitive. When the peer is not yet ready, we manually flip our own state to `SLEEPING`, set `p->chan`, and call `sched()` directly.
+- Updates `mycpu()->proc = t` before the direct swtch, so `scheduler()` can identify which process is actually handing control back.
+- Minor companion change in `scheduler()`: after `swtch` returns, release the lock of `c->proc` (which tracks the real returning process) instead of the stale local `p`. Without this, a direct-switch followed later by any call to `sched()` (e.g., from `wait`/`exit`) panics with `panic: release` because `scheduler`'s local `p` no longer matches the process whose lock is actually held.
+- Enforces all required error checks: `pid <= 0`, self-yield, non-existent pid, killed/zombie target.
 
 ### Step 6 - Add user-facing syscall declaration and stub
 In `user/user.h`:
@@ -85,24 +87,36 @@ In `Makefile`:
 ---
 
 ## 4. Core Logic Explanation
-### 4.1 Why wait_lock is used
-`co_yield` uses `wait_lock` to serialize rendezvous and avoid missed wakeups between:
-- checking peer state,
-- sleeping,
-- waking a matching peer.
+### 4.1 Locks used
+- `wait_lock` serializes the whole rendezvous attempt (find target, check states, flip states) so a peer cannot half-observe us in transition.
+- `t->lock` + `p->lock` protect each process's own state/chan/trapframe fields while we set them.
 
-### 4.2 Rendezvous protocol
-Each `co_yield(pid, value)` call:
-1. Validates arguments.
-2. Locates target process by PID.
-3. Verifies target is alive/not zombie.
-4. Delivers `value` only when peer is actually waiting on caller channel.
-5. Sleeps until reciprocal handoff is completed.
-6. Returns received positive value.
+### 4.2 Rendezvous protocol — direct hand-off path
+When `t->state == SLEEPING && t->chan == p` (peer is blocked waiting for us), we:
+1. Write the payload into `t->trapframe->a0` (becomes the peer's `co_yield` return value).
+2. Flip `t->state = RUNNING` and `p->state = SLEEPING`, skipping `RUNNABLE` entirely.
+3. Set `p->chan = t` (so a later `co_yield(p, ...)` from `t` matches).
+4. Update `mycpu()->proc = t` so the CPU and the scheduler agree on who is running.
+5. Release `wait_lock` and our own `p->lock`. The target's lock stays held; by symmetry the target's own code will release it when it resumes.
+6. Call `swtch(&p->context, &t->context)` — direct process-to-process context switch, bypassing `scheduler()`.
+7. When we are later resumed (by a peer's direct swtch into us), `p->lock` is held for us and our peer has stored the incoming value in `p->trapframe->a0`. We read `killed` + `a0`, release `p->lock`, return.
 
-### 4.3 Return semantics
-- Success path returns a positive value received from peer.
-- Any invalid/error condition returns `-1`.
+Note on locking: we deliberately drop `p->lock` before `swtch`. The usual xv6 convention (hold own lock across `swtch`, let `scheduler` release it) does not apply — there is no scheduler thread in this path to release it for us, and keeping it held would deadlock any peer that later tries to `acquire(p->lock)` to hand control back. Single-CPU (`CPUS=1`) makes this safe: no other thread runs on this CPU between the release and the `swtch`.
+
+### 4.3 Rendezvous protocol — peer not ready
+If the target is not yet blocked waiting for us, we:
+1. Release `t->lock`.
+2. Set our own `p->chan = t` and `p->state = SLEEPING` manually (no call to `sleep()`).
+3. Release `wait_lock`.
+4. Call `sched()` with `p->lock` still held, per `sched()`'s precondition.
+5. On resume — either a peer's direct swtch or the scheduler re-picking us after `kill()` — `p->lock` is held; we read `killed` + `a0`, release, return.
+
+### 4.4 Scheduler companion change
+`scheduler()` keeps a local `p` across its `swtch`. After a direct hand-off the process that later returns control via `sched()` is not the one scheduler originally swtched to, so the local `p` is stale. We replace scheduler's post-swtch `release(&p->lock)` target with `c->proc`, which co_yield keeps current. Standard (non-coroutine) flows are unaffected: `c->proc == p` in that case.
+
+### 4.5 Return semantics
+- Success: returns the positive value delivered by the peer.
+- Invalid/error conditions (including being killed while suspended): `-1`.
 
 ---
 
