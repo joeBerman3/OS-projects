@@ -680,12 +680,11 @@ co_yield(int pid, int value)
 
     // t->lock stays held across swtch. When t resumes past its own
     // earlier swtch it will release its own lock (it returns into
-    // either the sched() branch below or the mirror of this branch).
+    // either the sched() branch below or the mirror of this branch)
     swtch(&p->context, &t->context);
 
     // Resumed: the peer that switched back to us acquired p->lock
-    // to deliver its payload and flip our state; by symmetry it is
-    // held now.
+    // to deliver its payload and flip our state; by symmetry it is held now.
     int k = p->killed;
     uint64 v = p->trapframe->a0;
     release(&p->lock);
@@ -700,7 +699,6 @@ co_yield(int pid, int value)
   p->state = SLEEPING;
 
   release(&wait_lock);
-  // p->lock stays held, as sched() requires.
 
   sched();
 
