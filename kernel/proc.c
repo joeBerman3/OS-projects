@@ -657,7 +657,7 @@ co_yield(int pid, int value)
   }
 
   if(t->state == SLEEPING && t->chan == p){
-    // Peer is already blocked waiting for us: direct hand-off,
+    // Peer is already blocked waiting for us: direct hand-off
     // bypassing scheduler() and skipping RUNNABLE entirely.
     t->trapframe->a0 = value; // deliver payload
     t->state = RUNNING;
